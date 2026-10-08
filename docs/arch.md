@@ -859,7 +859,7 @@ Receiver: RP2040 PIO shifting in on MEM_CLK with 8-bit autopush and DMA into RAM
 ### Module hierarchy
 
 ```
-tt_um_jayden_protoemu          project.v       Tiny Tapeout wrapper, ties ena, renames pins
+coms_emu_js_tt_JCDM            project.v       Tiny Tapeout wrapper, ties ena, renames pins
 └── protoemu_top               protoemu_top.sv
     ├── host_spi               host_spi.sv     Controller: receiver, MISO
     ├── cmd_decode             cmd_decode.sv   Controller: decoder, status register
