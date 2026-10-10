@@ -1,25 +1,41 @@
 # Tiny Tapeout project information
 project:
   title:        "SoC/IP Approach to Communication Protocol Emulation"      # Project title
-  author:       "Jayden Lee-Sin, Carlos Espinoza, Derrick Bassey"      # Your name
+  author:       "Jayden Lee-Sin, Carlos Espinoza, Derrick Bassey, Mateo Nery"      # Your name
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
   description:  "Our participation in the JS TT ASIC challenge!"      # One line description of what your project does
-  language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
+  language:     "SystemVerilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
   clock_hz:     0       # Clock frequency in Hz (or 0 if not applicable)
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
   tiles: "6x4"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
-  #FIXME
-  top_module:  "tt_um_example"
+  top_module:  "tt_um_coms_emu_js_JCDM"
 
   # List your project's source files here.
   # Source files must be in ./src and you must list each source file separately, one per line.
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
-  #FIXME
+  # pe_pkg.sv must stay first so the package is compiled before its users.
   source_files:
+    - "pe_pkg.sv"
     - "project.v"
+    - "protoemu_top.sv"
+    - "controller.sv"
+    - "host_spi.sv"
+    - "cmd_decode.sv"
+    - "rewrite_fsm.sv"
+    - "protocol_mem.sv"
+    - "pin_regs.sv"
+    - "pin_crossbar.sv"
+    - "pinset.sv"
+    - "cfg_latch.sv"
+    - "primitives.sv"
+    - "sequencer.sv"
+    - "rx_fsm.sv"
+    - "tx_fsm.sv"
+    - "dump_gui.sv"
+    - "dump_mem.sv"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
