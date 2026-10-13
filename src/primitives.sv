@@ -18,8 +18,11 @@
 //                 tick (TX) from the internal divider, the CLK slot edges
 //                 (CLKED) or Manchester interval measurement, plus the
 //                 idle-time count in bit times; drives the CLK slot under
-//                 CLK_RUN (arch.md: Translation FSM, stage 3; Transmission
-//                 FSM, stage 6).
+//                 CLK_RUN. TRIM makes every Nth period one cycle shorter or
+//                 longer, CLK_WAIT holds the counter while the CLK slot is
+//                 driven high but reads low, and drive_sync puts the next
+//                 drive tick half a bit away (arch.md: Translation FSM,
+//                 stage 3; Transmission FSM, stage 6).
 //   crc_reg       Right-shifting reflected CRC register covering CRC5,
 //                 CRC16 and CRC32, with residue compare (arch.md:
 //                 Translation FSM, stage 5).
@@ -79,19 +82,23 @@ module bit_timer (
     input  wire        clked,       // ticks from the CLK slot
     input  wire        cpol,
     input  wire        cpha,
+    input  wire [4:0]  trim,        // TRIM: [3:0] N, 0 = off; [4] 1 = longer
+    input  wire        clk_wait,    // OPT CLK_WAIT
 
     // Events and levels
     input  wire        clk_rise,
     input  wire        clk_fall,
     input  wire        sel_on,
     input  wire        sel_level,   // SEL asserted now
+    input  wire        clk_level,   // CLK slot level now, for CLK_WAIT
     input  wire        din_edge,
     input  wire        din_level,
     input  wire        start_ev,
     input  wire        stop_ev,
 
     // Sequencer control
-    input  wire        timer_sync,  // TIMER_SYNC: reload to half a bit
+    input  wire        timer_sync,  // RX TIMER_SYNC: next sample tick half a bit away
+    input  wire        drive_sync,  // TX TIMER_SYNC: next drive tick half a bit away
     input  wire        clk_run,     // CLK_RUN / CLK_STOP level
     input  wire        clk_force,   // CLK_0 / CLK_1 active
     input  wire        clk_force_lvl,

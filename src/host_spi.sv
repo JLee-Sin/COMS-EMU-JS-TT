@@ -6,7 +6,7 @@
 //
 // Module: host_spi
 //   Two-flop synchronizers on SCK, MOSI and CS_n; edge detection; an MSB-
-//   first shift register with 3-bit bit counter; the 10-byte command buffer
+//   first shift register with 3-bit bit counter; the 11-byte command buffer
 //   with 4-bit byte counter and overflow flag; the MISO shift register,
 //   loaded with the status byte on CS_n fall and with readback bytes on
 //   request. Produces the cs_fall / cs_rise pulses on which cmd_decode
@@ -32,10 +32,10 @@ module host_spi (
     output wire        byte_done,       // a byte has landed in cmd_buf
 
     // Frame state, valid at cs_rise
-    output wire [3:0]  byte_cnt,        // bytes received, 0-10
+    output wire [3:0]  byte_cnt,        // bytes received, 0-11
     output wire        bit_misaligned,  // bit counter not 0 (partial last byte)
-    output wire        overflow,        // an 11th byte was seen
-    output wire [79:0] cmd_buf,         // bytes 0-9, byte 0 in [79:72]
+    output wire        overflow,        // a 12th byte was seen
+    output wire [87:0] cmd_buf,         // bytes 0-10, byte 0 in [87:80]
 
     // MISO data from cmd_decode
     input  wire [7:0]  status,          // loaded on cs_fall

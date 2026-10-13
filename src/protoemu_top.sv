@@ -9,7 +9,7 @@
 //   controller, rewrite_fsm, protocol_mem, pin_regs, pin_crossbar, four
 //   pinset instances, dump_gui and dump_mem. It contains no logic of its
 //   own. project.v maps the Tiny Tapeout pins onto the named ports here so
-//   this module can be simulated or put on an FPGA without the TT interface.
+//   this module can be simulated without the TT interface.
 //
 //   Pin pool: P0-P7 are the bidirectional uio pins, P8-P11 the input-only
 //   ui_in[7:4], P12-P15 the output-only uo_out[7:4] (arch.md: I/O).

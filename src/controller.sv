@@ -41,8 +41,8 @@ module controller (
 
     // TRANSMIT to the pinsets
     output wire [3:0]  tx_load,        // one-cycle strobe per pinset
-    output wire [3:0]  tx_len,         // 1-8
-    output wire [63:0] tx_data,        // payload, byte 0 in [63:56]
+    output wire [3:0]  tx_len,         // 1-9
+    output wire [71:0] tx_data,        // payload, byte 0 in [71:64]
     output wire        tx_hold,
     output wire        tx_persist,
 
@@ -64,6 +64,7 @@ module controller (
     input  wire [3:0]  tx_busy,
     input  wire [3:0]  tx_lock,
     input  wire [3:0]  rx_ovf,
+    input  wire [3:0]  tx_coll,        // one-cycle pulse: a TX program stopped on a collision
     input  wire [11:0] proto,          // {proto[3], proto[2], proto[1], proto[0]}
     input  wire [3:0]  master,
     input  wire        dump_pending,

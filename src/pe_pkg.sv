@@ -35,7 +35,8 @@ package pe_pkg;
   localparam logic [1:0] ERR_INCAPABLE    = 2'b10;
   localparam logic [1:0] ERR_BUSY         = 2'b11;
 
-  localparam int CMD_BUF_BYTES = 10;               // longest legal frame
+  localparam int CMD_BUF_BYTES = 11;               // longest legal frame: TRANSMIT, N = 9
+  localparam int TX_BUF_BYTES  = 9;                // TRANSMIT payload, N = 1-9
 
   // --------------------------------------------------------- Protocol memory
   // 512 x 16-bit words, 9-bit word address, 4-word blocks.
@@ -75,6 +76,7 @@ package pe_pkg;
 
   localparam logic [1:0] LINE_NRZ = 2'b00, LINE_NRZI = 2'b01, LINE_MANCHESTER = 2'b10;
   localparam logic [1:0] CRC_NONE = 2'b00, CRC_5 = 2'b01, CRC_16 = 2'b10, CRC_32 = 2'b11;
+  localparam logic [1:0] STOP_1 = 2'b00, STOP_1P5 = 2'b01, STOP_2 = 2'b10;
 
   // ----------------------------------------------- Per-pin register, 16 bits
   localparam int PIN_EN       = 15;
@@ -122,11 +124,22 @@ package pe_pkg;
 
   // IMM ops
   localparam logic [3:0] I_LOAD_IMM = 4'd0, I_MATCH_IMM = 4'd1,
-                         I_COUNT_IMM = 4'd2, I_CRC_SEL = 4'd3;
+                         I_COUNT_IMM = 4'd2, I_CRC_SEL = 4'd3,
+                         I_OPT = 4'd4, I_TRIM = 4'd5, I_CPL_CHECK = 4'd6;
+
+  // OPT flags, in IMM[2:0]. Set by the RX program, cleared when VALID falls.
+  localparam int OPT_IDLE_RUN = 0;                 // TX program runs between messages
+  localparam int OPT_CLK_WAIT = 1;                 // bit timer waits for a CLK held low
+  localparam int OPT_COLL     = 2;                 // drive-1-read-0 stops the TX program
+
+  // TRIM, in IMM[4:0]: every Nth bit-timer period is one cycle off BIT_DIV.
+  localparam int TRIM_N_H = 3, TRIM_N_L = 0;       // N, 0 = off
+  localparam int TRIM_LONGER = 4;                  // 0 one cycle shorter, 1 longer
 
   // CNT special values (1-27 are literals)
   localparam logic [4:0] CNT_DATA_BITS = 5'd0, CNT_STOP = 5'd28,
-                         CNT_COUNT = 5'd29, CNT_CRC_LEN = 5'd30;
+                         CNT_COUNT = 5'd29, CNT_CRC_LEN = 5'd30,
+                         CNT_HALF = 5'd31;         // 1 when STOP = 1.5, else 0
 
   // Branch conditions: even = flag, odd = negation, 0 = ALWAYS
   localparam logic [4:0] C_ALWAYS = 5'd0,

@@ -12,6 +12,10 @@
 //   record buffer with its header snapshot (latch-based) and the dump
 //   enable and status flops. The TX buffer lives in tx_fsm.
 //
+//   The RX program's OPT flags and TRIM value (rx_fsm) are routed here:
+//   IDLE_RUN and COLL to tx_fsm, CLK_WAIT and TRIM to bit_timer, together
+//   with the CLK slot level and tx_fsm's drive_sync.
+//
 //   Parameter FULL_PROTOCOLS = 0 removes the Manchester encoder and
 //   decoder, the interval classifier, the destuffer and the CRC32 taps as
 //   the first area mitigation; every instance currently sets it to 1.
@@ -40,7 +44,7 @@ module pinset #(
     // From the Controller
     input  wire        tx_load,
     input  wire [3:0]  tx_len,
-    input  wire [63:0] tx_data,
+    input  wire [71:0] tx_data,
     input  wire        tx_hold,
     input  wire        tx_persist,
     input  wire        gui_en,
@@ -58,6 +62,7 @@ module pinset #(
     output wire        tx_busy,
     output wire        tx_lock,
     output wire        rx_ovf,
+    output wire        tx_coll,        // one-cycle pulse, from tx_fsm
 
     // To the GUI Output Controller
     output wire        gui_rec_valid,

@@ -63,7 +63,7 @@ Protocols are not fixed in silicon. Each one is a pair of small programs, one fo
 | Program | A sequence of 16-bit instructions run by a sequencer. Each protocol slot holds one TX program and one RX program of up to 56 instructions each. |
 | Sequencer | The interpreter in each pinset that runs a program. There are two per pinset, one for TX and one for RX. |
 | Template | A protocol-memory entry holding the registers for one protocol configuration, including which slot it runs. |
-| Image | The full default contents of the protocol memory: four program pairs and eight templates. ETH10 ships as an overlay that replaces one slot. |
+| Image | The full default contents of the protocol memory: four program pairs and eight templates. Overlays (ETH10, UART space parity, I2C 10-bit target) each replace one slot. |
 | Record | One decoded message with its header, as sent on the GUI output. |
 | Slot (memory) | One fixed 8-byte unit on the memory output. Called a memory slot where the two meanings could be confused. |
 | Armed | A target-mode response loaded by TRANSMIT and waiting for the external controller. |
@@ -111,7 +111,7 @@ Protocols are not fixed in silicon. Each one is a pair of small programs, one fo
 
 ## OpCodes
 
-The host sends commands as SPI frames on the host port. A frame is everything between CS_n falling and CS_n rising: one header byte followed by zero to nine payload bytes.
+The host sends commands as SPI frames on the host port. A frame is everything between CS_n falling and CS_n rising: one header byte followed by zero to ten payload bytes.
 
 ```
 CS_n  ‾‾\______________________________________________/‾‾
@@ -135,7 +135,7 @@ MISO      [ status ][ 0x00, or READ_STATUS data      ]
 | `0x0` | NOP | 1 | Controller | No |
 | `0x1` | SET_PROTO | 2 or 4 | Rewrite FSM | Busy, pin conflict, incapable pin |
 | `0x2` | DUMP_CTRL | 1 | Controller | No |
-| `0x3` | TRANSMIT | 2 + N, N = 1–8 | Pinset Controller | Busy |
+| `0x3` | TRANSMIT | 2 + N, N = 1–9 | Pinset Controller | Busy |
 | `0x4` | READ_STATUS | 1 + 4 readback | Controller | No |
 | `0x5` | RELEASE | 1 | Rewrite FSM | Busy |
 | `0x6` | MEM_RESET | 1 | Memory Output Controller | No |
@@ -157,7 +157,7 @@ Loads a template into pinset PS.
 | 1 | `[7:5]` template index, `[4]` override present, `[3:0]` pin offset |
 | 2–3 | Override value V, MSB first. Present only when byte 1 bit 4 is set |
 
-Template indices in the default image: 0 UART, 1 SPI controller, 2 SPI target, 3 I2C controller, 4 I2C target, 5 USB_LS, 6 ETH10, 7 RAW. A template names the protocol slot it runs in its PROTO field, so after the host rewrites the protocol memory the indices mean whatever the host loaded.
+Template indices in the default image: 0 UART, 1 SPI controller, 2 SPI target, 3 I2C controller, 4 I2C target, 5 USB_LS host, 6 USB_LS device (ETH10 once its overlay is loaded), 7 RAW. A template names the protocol slot it runs in its PROTO field, so after the host rewrites the protocol memory the indices mean whatever the host loaded.
 
 The pin offset is added to every enabled slot of the template's ROLE_MAP. It moves the whole protocol as a block.
 
@@ -166,7 +166,7 @@ The override replaces one field of the template's pinset register. The host choo
 | SUB[0] | V |
 |---|---|
 | 0 | BIT_DIV `[15:0]`, system clocks per bit (per half-bit when LINE_CODE is Manchester). Meaningless for a template with CLKED = 1, where the external clock sets the rate; the value is stored and ignored |
-| 1 | ADDR `[6:0]`, the 7-bit own address. `[15:7]` must be 0 |
+| 1 | ADDR `[6:0]`, the 7-bit own address (an I2C target address, a USB device address). `[15:7]` must be 0 |
 
 Validation happens before any change:
 
@@ -199,34 +199,42 @@ Queues a message on pinset PS.
 | Byte | Content |
 |---|---|
 | 0 | `0x3`, PS, SUB: `[1]` PERSIST, `[0]` HOLD |
-| 1 | Length N, 1–8 |
+| 1 | Length N, 1–9 |
 | 2 … N+1 | Payload |
 
-Rejected as bad frame if N is 0, above 8, or does not match the byte count. Rejected busy if pinset PS is invalid or `tx_lock` is set (see below).
+Rejected as bad frame if N is 0, above 9, or does not match the byte count. Rejected busy if pinset PS is invalid or `tx_lock` is set (see below).
 
 **Payload by protocol**
 
 | Protocol | Byte 0 | Rest |
 |---|---|---|
 | UART | Data | Data |
-| SPI controller | Data | Data. CS is held low for the whole message |
+| SPI controller | Data | Data. CS is held low for the whole message, and stays low after it with HOLD |
 | SPI target | Data | Data. Shifted out on MISO when the external controller asserts CS |
 | I2C controller, write (byte 0 bit 0 = 0) | 7-bit address in `[7:1]`, 0 in `[0]` | Data bytes written to the target |
 | I2C controller, read (byte 0 bit 0 = 1) | 7-bit address in `[7:1]`, 1 in `[0]` | Byte 1 = number of bytes to read, 1–255. N should be 2 |
 | I2C target | Data | Data. Sent when the external controller reads from the pinset's address |
-| USB_LS | PID byte as sent on the wire: PID in `[3:0]`, its complement in `[7:4]` | Packet payload. SYNC, CRC and EOP are added |
+| USB_LS host | PID byte as sent on the wire: PID in `[3:0]`, its complement in `[7:4]` | Packet payload, up to 8 bytes. SYNC, CRC and EOP are added |
+| USB_LS device | The same | The same. Sent as the reply when the host addresses the pinset |
 | ETH10 | Data | Data. Preamble, SFD and CRC32 are added |
 | RAW | Data | Data. Sent on slot 0 with no framing |
 
 The Controller checks only N against the byte count. What the payload means is defined by the protocol program, so the table above describes the default image. The default I2C program treats a read with count 0 as an error: it sends STOP and flags the message. Bytes read from the target go to the dump outputs as one message, the same as any receive.
 
-**HOLD (SUB bit 0), I2C controller only.** The sequencer omits the STOP after the message and holds SCL low. The next TRANSMIT on the pinset begins with a repeated START instead of a START. This is how a register read is done: a HOLD write of the register address, then a read. Transmit-busy clears after the held message as usual. RELEASE or SET_PROTO on a pinset holding the bus releases the lines without a STOP. HOLD is ignored on other protocols.
+**HOLD (SUB bit 0), controller modes.** The program ends the message without releasing the bus, and the next TRANSMIT on the pinset continues the same transaction. What that means is the program's choice:
+
+- I2C controller: the STOP is omitted and SCL is held low. The next message begins with a repeated START instead of a START. This is how a register read is done: a HOLD write of the register address, then a read.
+- SPI controller: CS stays low and SCLK stops. The next message continues with CS still low, so a transaction longer than 9 bytes is sent as several HOLD messages and a last one without HOLD. The receive side sees one message.
+
+Transmit-busy clears after the held message as usual. RELEASE or SET_PROTO on a pinset holding the bus releases the lines (on I2C, without a STOP). HOLD is ignored by the other default programs.
 
 **PERSIST (SUB bit 1), target modes only.** The response re-arms from byte 0 after every transaction until it is replaced by another TRANSMIT, or the pinset is released or reconfigured. Without PERSIST the response is consumed by the first transaction. PERSIST is ignored in controller modes.
 
 **Controller modes.** The message is sent at once. Transmit-busy is set from the load until the last bit leaves the pins, and `tx_lock` equals transmit-busy.
 
-**Target modes.** TRANSMIT arms a response. Transmit-busy means armed or active. `tx_lock` is set only while the response is active: from CS assertion to CS deassertion on an SPI target, or from address match to STOP on an I2C target. While a response is merely armed, a new TRANSMIT replaces it. A one-shot response that is only partly consumed (CS deasserted early, or an early NACK) is discarded whole. A persistent response restarts from byte 0 at the next transaction. If the external controller takes more bytes than were loaded, or reads when nothing is armed, an SPI target shifts 0 and an I2C target sends 0xFF. Neither sets an error.
+**Target modes.** TRANSMIT arms a response. Transmit-busy means armed or active. `tx_lock` is set only while the response is active: from CS assertion to CS deassertion on an SPI target, from address match to STOP on an I2C target, or from the end of the host's packet to the end of the reply on a USB_LS device. While a response is merely armed, a new TRANSMIT replaces it. A one-shot response that is only partly consumed (CS deasserted early, or an early NACK) is discarded whole. A persistent response restarts from byte 0 at the next transaction. If the external controller takes more bytes than were loaded, or reads when nothing is armed, an SPI target shifts 0 and an I2C target sends 0xFF. Neither sets an error.
+
+**USB_LS device.** TRANSMIT arms one packet, PID byte first. The pinset's address is ADDR, 0 until SET_PROTO overrides it. The reply goes out, within the bus turnaround time, when the host has finished a turn that this device must answer: an IN token to ADDR, or a data packet with a good CRC that follows an OUT or SETUP token to ADDR. A token or data packet with an error gets no reply. The chip does not choose the reply; it sends whatever is armed, so the host firmware arms an ACK, a NAK or a data packet ahead of the transfer it expects. A persistent NAK keeps a device answering "not ready" until the firmware replaces it. With nothing armed the device stays silent and the USB host times out and retries.
 
 Examples: `3C 02 48 69` sends "Hi" on pinset 3. `35 02 A0 10` then `34 02 A1 04` writes register 0x10 to I2C device 0x50 on pinset 1 and reads 4 bytes with a repeated START. `3A 02 DE AD` arms a persistent 2-byte SPI target response on pinset 2.
 
@@ -237,7 +245,7 @@ The host sends the header and then clocks four more bytes. The values are captur
 | Readback byte | Content |
 |---|---|
 | 1 | `[7:4]` VALID per pinset, `[3:0]` transmit-busy per pinset |
-| 2 | `[7:4]` RX overflow per pinset (cleared on read), `[3]` Rewrite FSM busy, `[2:0]` reserved |
+| 2 | `[7:4]` RX overflow per pinset (cleared on read), `[3]` Rewrite FSM busy, `[2]` TX collision on any pinset (cleared on read), `[1:0]` reserved |
 | 3 | Owned-pin mask P15–P8 |
 | 4 | Owned-pin mask P7–P0 |
 
@@ -296,7 +304,7 @@ Shifted out on MISO, MSB first, while the header byte shifts in. It describes th
 
 | Error code | Name | Raised by |
 |---|---|---|
-| `00` | Bad frame | Wrong byte count, partial last byte, buffer overflow, reserved op, TRANSMIT length 0 or above 8, SET_PROTO of a template whose PROTO is 4–6, WRITE_MEM or READ_MEM block above 127 |
+| `00` | Bad frame | Wrong byte count, partial last byte, buffer overflow, reserved op, TRANSMIT length 0 or above 9, SET_PROTO of a template whose PROTO is 4–6, WRITE_MEM or READ_MEM block above 127 |
 | `01` | Pin conflict | Target pin owned by another pinset, or offset pushes a slot past P15 |
 | `10` | Incapable pin | Role needs a capability its pin lacks |
 | `11` | Busy | Rewrite in progress, `tx_lock` set, TRANSMIT to an invalid pinset, WRITE_MEM to a slot a valid pinset is running |
@@ -313,7 +321,7 @@ At 5 MHz SCK each byte takes 1.6 µs (64 cycles).
 | RELEASE | 1 | 1.6 µs | 10–40 cycles | ~1.7–2.6 µs |
 | SET_PROTO | 2 | 3.2 µs | 200–300 cycles | ~8–11 µs |
 | SET_PROTO with override | 4 | 6.4 µs | 200–300 cycles | ~11.5–14 µs |
-| TRANSMIT, 8 bytes | 10 | 16 µs | 1 cycle, then line time | ~16 µs to start |
+| TRANSMIT, 9 bytes | 11 | 17.6 µs | 1 cycle, then line time | ~17.6 µs to start |
 | WRITE_MEM | 10 | 16 µs | ≤ 50 cycles | ~17 µs |
 | READ_MEM | 2 + 8 | 16 µs + 1.5 µs pause | ≤ 50 cycles | ~18 µs |
 
@@ -459,7 +467,7 @@ wire cs_rise  =  cs_sync  & ~cs_prev;   // commit
 ```
 
 3. Shift register. On each `sck_rise` the MOSI bit shifts into an 8-bit register and a 3-bit bit counter advances. When the counter wraps, the byte is written to the command buffer and a 4-bit byte counter advances.
-4. Command buffer. 10 bytes, the longest legal frame. `cs_fall` clears both counters. An 11th byte sets an overflow flag.
+4. Command buffer. 11 bytes, the longest legal frame. `cs_fall` clears both counters. A 12th byte sets an overflow flag.
 5. MISO shift register. Loaded with the status byte on `cs_fall`; bit 7 is driven at once. Each `sck_fall` shifts out the next bit. After the header the register holds 0, except during READ_STATUS, when it is reloaded with each readback byte, and READ_MEM, when it is reloaded from the block fetched after byte 1.
 
 **READ_MEM, during the frame.** When byte 1 completes and the header is `0x8`, the Controller requests the four words of block B from the memory port and holds them in a 64-bit readback register. The MISO register is loaded from it byte by byte from byte 2 on. The request is made before commit because the data must be on MISO before CS_n rises; nothing else happens until the frame is validated.
@@ -489,11 +497,11 @@ wire cs_rise  =  cs_sync  & ~cs_prev;   // commit
 |---|---|---|---|
 | `rw_req`, `rw_op`, `rw_ps`, `rw_tmpl`, `rw_ovr`, `rw_val`, `rw_offset` | out | 1, 1, 2, 3, 1, 16, 4 | Request to the Rewrite FSM |
 | `rw_busy`, `rw_done`, `rw_err` | in | 1, 1, 2 | Rewrite FSM status and result |
-| `tx_load[3:0]`, `tx_len[3:0]`, `tx_data[63:0]`, `tx_hold`, `tx_persist` | out | — | TRANSMIT payload and flags to the pinsets |
+| `tx_load[3:0]`, `tx_len[3:0]`, `tx_data[71:0]`, `tx_hold`, `tx_persist` | out | — | TRANSMIT payload and flags to the pinsets |
 | `gui_en[3:0]`, `mem_en[3:0]` | out | — | Dump enables |
 | `mem_reset` | out | 1 | To the Memory Output Controller |
 | `pm_req`, `pm_we`, `pm_addr[8:0]`, `pm_wdata[15:0]`, `pm_rdata[15:0]`, `pm_ack` | out / in | — | Protocol memory port, one word per request |
-| `valid[3:0]`, `tx_busy[3:0]`, `tx_lock[3:0]`, `rx_ovf[3:0]`, `proto[3:0][2:0]`, `master[3:0]`, `dump_pending`, `owned[15:0]` | in | — | Status inputs |
+| `valid[3:0]`, `tx_busy[3:0]`, `tx_lock[3:0]`, `rx_ovf[3:0]`, `tx_coll[3:0]`, `proto[3:0][2:0]`, `master[3:0]`, `dump_pending`, `owned[15:0]` | in | — | Status inputs |
 
 **Timing.** The TRANSMIT copy takes one cycle. A WRITE_MEM issues four port requests in sequence; the command buffer is held until the last is acknowledged, at most about 50 cycles. The next frame cannot complete its first byte for about 64 cycles, so no double buffering of the command buffer is needed.
 
@@ -588,10 +596,15 @@ Stores each slot's previous value and produces one-cycle pulses: DIN rise, fall 
 Produces a sample tick for the RX sequencer and a drive tick for the TX sequencer. The mode comes from two register fields, not from the protocol:
 
 - CLKED = 1 (clocked target): the ticks are the CLK slot's edges. CPOL and CPHA choose which edge samples; the other edge drives. Ticks are gated by SEL when slot 3 is mapped. The tick is suppressed in the cycle of a START or STOP. With CPHA = 0 a drive tick is also produced when SEL asserts, so the first bit is on the line before the first clock edge.
-- CLKED = 0, LINE_CODE NRZ or NRZI (internal timing): a 16-bit phase counter reloads to BIT_DIV−1 and produces one drive tick and one sample tick (half a bit later) per period. TIMER_SYNC from the RX program reloads it to BIT_DIV/2 so the next sample tick lands mid-bit; with LINE_CODE = NRZI every DIN edge does the same automatically, which is what USB_LS needs (bit stuffing guarantees an edge at least every 7 bits; worst-case drift about 8% of a bit with BIT_DIV 27). In a clocked controller CLK_RUN mirrors the counter onto the CLK slot.
+- CLKED = 0, LINE_CODE NRZ or NRZI (internal timing): a 16-bit phase counter reloads to BIT_DIV−1 and produces one drive tick and one sample tick (half a bit later) per period. TIMER_SYNC from the RX program reloads it to BIT_DIV/2 so the next sample tick lands mid-bit; with LINE_CODE = NRZI every DIN edge does the same automatically, which is what USB_LS needs (bit stuffing guarantees an edge at least every 7 bits; with BIT_DIV 27 alone the drift over that run is about 8% of a bit, and TRIM removes it). TIMER_SYNC from the TX program reloads the counter so the next drive tick comes half a bit later. In a clocked controller CLK_RUN mirrors the counter onto the CLK slot.
 - CLKED = 0, LINE_CODE Manchester: an interval counter measures cycles between DIN edges. Intervals shorter than 1.5 × BIT_DIV are half-bit, longer are full-bit; a flag tracks whether the next edge is mid-bit. Each mid-bit edge produces a sample tick with the bit: rising is 1, falling is 0. The drive tick runs every BIT_DIV cycles (one half-bit).
 
 The same counter measures idle time in bit times since the last DIN edge. The IDLE wait and the ENDS frame-end set read it; the thresholds are in the program, not here.
+
+Two settings adjust the internal counter. Neither has a register field: the RX program sets them (Sequencer, IMM operations) and they clear when VALID falls.
+
+- TRIM: every Nth period of the counter is one cycle shorter, or one cycle longer, than BIT_DIV, for N from 1 to 15. This gives rates that are not a whole number of clocks per bit. USB_LS at 40 MHz needs 26.67 clocks, which is BIT_DIV 27 with every third period one cycle shorter (27, 27, 26). A resync does not restart the count of periods.
+- CLK_WAIT: while the pinset drives the CLK slot high and the slot reads low, the counter stops, so no tick is produced until the line rises. On I2C this is clock stretching and clock synchronisation: a device holding SCL low delays the controller instead of being overrun. The CLK pin must be bidirectional, so that the slot reads the pad and not the pinset's own output. The pad's read-back delay (synchronizer, FILTER and the crossbar register, about 5 cycles) is added to every high phase, which lowers a 100 kHz clock by about 1%.
 
 **4. Line decode**
 
@@ -606,6 +619,7 @@ The destuffer (enabled by BIT_STUFF) counts consecutive 1s. After six, the next 
 - CRC: one right-shifting register with a selectable polynomial, reflected form, covers CRC5, CRC16 and CRC32. The polynomial comes from the CRC field or from the program's CRC_SEL, which also resets the register to all ones. It runs over every bit passed through SHIFT_IN while enabled, including the CRC field. CRC_CHECK compares the register with the width's fixed residue, so a program never needs to locate the CRC field. Residue constants come from the USB 2.0 and IEEE 802.3 specifications.
 - Parity: one flop XORs each data bit; PARITY_CHECK samples the parity slot and compares against PARITY.
 - Deserializer: each bit is written to position `cnt` (LSB first) or `DATA_BITS − cnt` (MSB first) of a 16-bit word. The word clears on EMIT. STREAM_IN emits automatically every DATA_BITS bits.
+- Complement check: CPL_CHECK sets the error flag unless bits `[7:4]` of the word are the complement of bits `[3:0]`. It takes one cycle and no branch, so it fits between two bits at any supported rate. A USB packet identifier is built this way.
 
 **6. RX sequencer**
 
@@ -646,7 +660,7 @@ TX buffer → [1] TX sequencer → [2] serializer → [3] parity / CRC → [4] b
           → [5] line encoder → [6] bit timing → [7] pin driver
 ```
 
-**1. TX sequencer.** A sequencer running the TX program at word `0x00` of the pinset's protocol slot. `tx_load` starts it at instruction 0. END stops it; with PERSIST in a target (MASTER = 0) END instead rewinds the buffer and restarts at 0. Invalidation or `buf_flush` stops it and returns the pins to idle. What the program does before, per and after each byte is up to the program; the default framing for each protocol is in the Protocol Memory section.
+**1. TX sequencer.** A sequencer running the TX program at word `0x00` of the pinset's protocol slot. `tx_load` starts it at instruction 0. With the IDLE_RUN option it also runs between messages (Idle run, below). END stops it; with PERSIST in a target (MASTER = 0) END instead rewinds the buffer and restarts at 0. Invalidation or `buf_flush` stops it and returns the pins to idle. What the program does before, per and after each byte is up to the program; the default framing for each protocol is in the Protocol Memory section.
 
 **Signals between the two sequencers**
 
@@ -668,7 +682,7 @@ The ACK bit of an I2C transfer no longer crosses between the FSMs: the TX progra
 
 **5. Line encoder.** NRZ passes through. NRZI toggles the line on a 0 and holds on a 1. Manchester emits two half-bits per bit: a 0 is high-then-low, a 1 is low-then-high.
 
-**6. Bit timing.** With CLKED = 0 the phase counter from BIT_DIV produces the drive tick; CLK_RUN mirrors the counter onto the CLK slot, CLK_0 and CLK_1 set its level directly for START and STOP sequences, CLK_STOP freezes it. For Manchester, BIT_DIV counts half-bits. With CLKED = 1 the drive tick comes from the event detector.
+**6. Bit timing.** With CLKED = 0 the phase counter from BIT_DIV produces the drive tick; CLK_RUN mirrors the counter onto the CLK slot, CLK_0 and CLK_1 set its level directly for START and STOP sequences, CLK_STOP freezes it. For Manchester, BIT_DIV counts half-bits. With CLKED = 1 the drive tick comes from the event detector. TIMER_SYNC in the TX program puts the next drive tick half a bit away, which is how a half stop bit is sent. TRIM and CLK_WAIT (Translation FSM, stage 3) act on the same counter and so on the drive tick too.
 
 **7. Pin driver.** Routes the data bit to the slot pins by role: DOUT alone, or DOUT and slot 1 driven complementary when DRIVE is differential. DRIVE_0, DRIVE_1 and DRIVE_IDLE set the line level directly; SEL_ON and SEL_OFF drive slot 3. Applies IDLE_LVL between messages and INVERT at the pad.
 
@@ -676,17 +690,30 @@ The ACK bit of an I2C transfer no longer crosses between the FSMs: the TX progra
 
 | Mode | `tx_busy` (status) | `tx_lock` (rejects TRANSMIT, SET_PROTO, RELEASE) |
 |---|---|---|
-| Controller (MASTER = 1) | Program running | Same as `tx_busy` |
+| Controller (MASTER = 1) | Program running on a loaded message | Same as `tx_busy`, and also while an idle run has executed LOCK |
 | Target (MASTER = 0) | Program running (armed or active) | Program running and it has executed LOCK since it started |
 
 The default target programs execute LOCK once the external controller has committed to them: SPI after SEL asserts, I2C after the address match. A new TRANSMIT while armed but not locked replaces the response: the running program is stopped and restarted on the new buffer. With PERSIST the response re-arms from byte 0 after each transaction; without it the buffer empties after the first transaction, even if only part of it was consumed. NEXT_BYTE on an empty buffer in a target loads the FILL byte (0x00 or 0xFF by the FILL field) with no error.
+
+**Idle run**
+
+A TX program normally runs only while a message is loaded. With the IDLE_RUN option set, the TX sequencer is also started whenever the pinset is valid, no message is loaded or being loaded, and the bus is not held. The buffer is then empty, so the program's first NEXT_BYTE sets EMPTY and the program branches to whatever it does between messages. END is followed by another idle run. `tx_busy` stays 0 throughout.
+
+A TRANSMIT stops the idle run and starts the program again on the message, exactly as it replaces an armed response. The exception is an idle run that has executed LOCK: the TRANSMIT is rejected busy and the host retries. An idle program therefore waits unlocked and takes LOCK only for the few bits it drives. The default USB_LS host program sends its keep-alive this way, and the ETH10 overlay its link pulse.
+
+**Collision**
+
+With the COLL option set, a 1 driven on DOUT that reads back as 0 on DIN at the sample tick stops the TX program at once, as `buf_flush` would: every slot returns to idle, the message is dropped, and `tx_busy` and HELD clear. The pinset raises `tx_coll` for one cycle, which sets the TX collision bit of READ_STATUS. On an open-drain line this is losing arbitration to another controller; the host sees the bit and sends the message again. Bits the program releases with SAMPLE are not compared, so a program must use SAMPLE, not DRIVE_1, wherever another device is expected to drive the line.
 
 **Interfaces**
 
 | Signal | Dir | Meaning |
 |---|---|---|
-| `tx_load`, `tx_len[3:0]`, `tx_data[63:0]`, `tx_hold`, `tx_persist` | in | From the Controller |
+| `tx_load`, `tx_len[3:0]`, `tx_data[71:0]`, `tx_hold`, `tx_persist` | in | From the Controller |
 | `tx_busy`, `tx_lock` | out | As defined above |
+| `tx_coll` | out | One-cycle pulse: the program was stopped by a collision |
+| `idle_run`, `coll_en` | in | IDLE_RUN and COLL options, set by the RX program |
+| `drive_sync` | out | TIMER_SYNC from the TX program, to the bit timer |
 | PEER, RW, HELD | in / out | Shared with the RX sequencer as listed above |
 | Event pulses, drive tick | in | From the event detector and bit timing |
 | `pm_req`, `pm_addr[8:0]`, `pm_rdata[15:0]`, `pm_ack` | out / in | Instruction fetch |
@@ -732,10 +759,12 @@ Any wait other than NONE also completes when an event in the current ENDS set fi
 |---|---|
 | 0 | DATA_BITS (1–16, from the pinset register) |
 | 1–27 | Literal |
-| 28 | STOP bits: 1 or 2 (1.5 is sent as 2) |
+| 28 | STOP bits: 2 when STOP = 2, otherwise 1 |
 | 29 | COUNT: the byte counter |
 | 30 | CRC_LEN: 5, 16 or 32 by the selected CRC |
-| 31 | Reserved |
+| 31 | HALF: 1 when STOP = 1.5, otherwise 0 |
+
+A count of 0 skips the instruction without waiting: HALF with any other STOP setting, or CRC_LEN with no CRC selected.
 
 **ACT operations**
 
@@ -762,7 +791,7 @@ Any wait other than NONE also completes when an event in the current ENDS set fi
 | 18 | CLK_STOP | Slot 2 holds its level |
 | 19 | CLK_0 | Slot 2 low |
 | 20 | CLK_1 | Slot 2 high |
-| 21 | TIMER_SYNC | Reload the bit timer to half a bit |
+| 21 | TIMER_SYNC | Reload the bit timer so that this sequencer's next tick is half a bit away: the sample tick in an RX program, the drive tick in a TX program |
 | 22 | SIGNAL | Set PEER for the other sequencer |
 | 23 | SET_ERR | Error flag on the current message |
 | 24 | LOAD_COUNT | Byte counter ← current serializer byte; sets ZERO |
@@ -770,7 +799,7 @@ Any wait other than NONE also completes when an event in the current ENDS set fi
 | 26 | STREAM_OUT | Repeat {TICK, SHIFT_OUT} with NEXT_BYTE every DATA_BITS bits until EMPTY or ENDF |
 | 27 | STREAM_IN | Repeat {TICK, SHIFT_IN} with EMIT every DATA_BITS bits until ENDF |
 | 28 | MATCH_ADDR | MATCH ← deserializer `[7:1]` == ADDR; RW ← deserializer `[0]` |
-| 29 | LOCK | Target: `tx_lock` from now until END |
+| 29 | LOCK | `tx_lock` from now until END. For a target once the external controller has committed to it, and for an idle run while it drives the line |
 | 30 | ENDS | Set the frame-end set from CNT: `[4]` SE0, `[3]` SEL_OFF, `[2]` STOP, `[1:0]` IDLE: 0 off, 1 = 2, 2 = 8, 3 = 24 bit times. Clears ENDF |
 | 31 | END | TX: stop, or re-arm when PERSIST and MASTER = 0. CNT`[0]` = 1 also sets HELD. RX: restart at 0 |
 
@@ -784,7 +813,12 @@ STREAM_OUT and STREAM_IN are the hot loops. They let a byte stream run without a
 | 1 | MATCH_IMM | MATCH ← deserializer `[7:0]` == IMM |
 | 2 | COUNT_IMM | Byte counter ← IMM |
 | 3 | CRC_SEL | CRC ← IMM`[1:0]` (0 off, 1 CRC5, 2 CRC16, 3 CRC32); reset the register to all ones |
-| 4–15 | — | Reserved, no-op |
+| 4 | OPT | RX program only. Option flags ← IMM`[2:0]`: `[0]` IDLE_RUN, `[1]` CLK_WAIT, `[2]` COLL |
+| 5 | TRIM | RX program only. Every Nth bit-timer period is one cycle off BIT_DIV: IMM`[3:0]` N (0 off), IMM`[4]` 0 shorter, 1 longer |
+| 6 | CPL_CHECK | RX program only. SET_ERR unless deserializer `[7:4]` is the complement of `[3:0]` |
+| 7–15 | — | Reserved, no-op |
+
+OPT and TRIM hold pinset-level settings that the fully allocated pinset register has no room for. They belong to the RX program because it runs whenever the pinset is valid, so the settings are in force before the first TRANSMIT; in a TX program they do nothing. Both clear when VALID falls. IDLE_RUN and COLL are described under Transmission FSM, TRIM and CLK_WAIT under Translation FSM, stage 3.
 
 **Branch conditions**
 
@@ -816,11 +850,11 @@ Each sequencer holds a 6-bit PC, the current instruction, one prefetched instruc
 
 Fetches go through the protocol memory port, one 16-bit word each. The next sequential instruction is requested as soon as the current one starts executing, so straight-line code never waits. A taken branch requests its target and waits; worst case is about 12 cycles (up to 10 requesters round-robin, 1 cycle SRAM latency, 1 cycle return). Programs that need per-byte decisions at high bit rates use STREAM ops or keep the branch outside the bit loop.
 
-A sequencer stops when VALID falls, on `buf_flush`, or (TX only) at END. Stopping returns DOUT, CLK and SEL to their idle levels and clears PEER, HELD and LOCK.
+A sequencer stops when VALID falls, on `buf_flush`, or (TX only) at END or on a collision with the COLL option set. Stopping returns DOUT, CLK and SEL to their idle levels and clears PEER, HELD and LOCK. A fetch request that has not been acknowledged is removed; see Protocol Memory, Port and arbiter.
 
 **Example: default UART programs**
 
-TX program (9 instructions):
+TX program (10 instructions):
 
 ```
  0  ACT NONE     ENDS         0          ; no frame-end events
@@ -828,10 +862,12 @@ TX program (9 instructions):
  2  ACT TICK     DRIVE_0                 ; start bit
  3  ACT TICK     SHIFT_OUT    DATA_BITS
  4  ACT TICK     PARITY_OUT              ; skipped when PARITY = none
- 5  ACT TICK     DRIVE_1      STOP       ; stop bits
- 6  ACT NONE     NEXT_BYTE
- 7  BR  !EMPTY   → 2
- 8  ACT NONE     END
+ 5  ACT TICK     DRIVE_1      STOP       ; stop bits: 1, or 2 when STOP = 2
+ 6  ACT TICK     TIMER_SYNC   HALF       ; STOP = 1.5 only: after one stop bit,
+                                         ; the next drive tick is half a bit away
+ 7  ACT NONE     NEXT_BYTE
+ 8  BR  !EMPTY   → 2
+ 9  ACT NONE     END
 ```
 
 RX program (15 instructions):
@@ -871,7 +907,7 @@ The Pinset Controller has two parts: the shared pin pool, which owns the pads, a
 
 **Pinset instance (four instances)**
 
-Contains: the pinset register (see Register Bank), slot muxes, event detector, Translation FSM and Transmission FSM each with its sequencer, the shared PEER, RW and HELD flags, the 8-byte TX buffer and the 8-byte GUI buffer with its header snapshot (both latch-based, see Register Bank), dump enable flops and status flops.
+Contains: the pinset register (see Register Bank), slot muxes, event detector, Translation FSM and Transmission FSM each with its sequencer, the shared PEER, RW and HELD flags, the 9-byte TX buffer and the 8-byte GUI buffer with its header snapshot (both latch-based, see Register Bank), dump enable flops and status flops.
 
 | Signal | Dir | Meaning |
 |---|---|---|
@@ -880,7 +916,7 @@ Contains: the pinset register (see Register Bank), slot muxes, event detector, T
 | `valid`, `ps_reg[63:0]` | — | Pinset register |
 | `tx_load`, `tx_len`, `tx_data`, `tx_hold`, `tx_persist`, `gui_en`, `mem_en` | in | From the Controller |
 | `rx_abort`, `buf_flush`, `valid_clr`, `ps_we`, `ps_word`, `ps_wdata` | in | From the Rewrite FSM |
-| `tx_busy`, `tx_lock`, `rx_ovf` | out | Status |
+| `tx_busy`, `tx_lock`, `rx_ovf`, `tx_coll` | out | Status |
 | `gui_rec_valid`, `gui_hdr[23:0]`, `gui_data[63:0]`, `gui_len[3:0]`, `gui_flags[1:0]`, `gui_rec_take` | out / in | To the GUI Output Controller |
 | `mem_push`, `mem_entry[10:0]` | out | To the Memory Output Controller: `{end, error, truncated, byte[7:0]}` |
 | `pm_req[1:0]`, `pm_addr[1:0][8:0]`, `pm_rdata[15:0]`, `pm_ack[1:0]` | out / in | Instruction fetch, one request line per sequencer |
@@ -927,7 +963,7 @@ Slot roles are fixed (slot 0 DOUT, 1 DIN, 2 CLK, 3 SEL; see the Translation FSM)
 | SPI target | MISO | MOSI | SCLK | CS | 1 | 1 |
 | I2C controller | SDA | SDA (same pin) | SCL | — | 1 | 0 |
 | I2C target | SDA | SDA (same pin) | SCL | — | 1 | 1 |
-| USB_LS | D+ | D− | — | — | 1 | 0 |
+| USB_LS host, USB_LS device | D+ | D− | — | — | 1 | 0 |
 | ETH10 (overlay) | TX+ | TX− | RX+ | RX− | 2 | 0 |
 | RAW | out | in | — | — | 1 | 0 |
 
@@ -951,9 +987,9 @@ Slot roles are fixed (slot 0 DOUT, 1 DIN, 2 CLK, 3 SEL; see the Translation FSM)
 
 **Storage.** VALID, EN and OWNER are reset flops. Every other field is a latch. Latches are instantiated from the PDK cells through a `cfg_latch` module (behavioural model under `` `ifdef SIM``), 16 bits per word, with each word's write enable passed through the PDK clock-gating cell. The latches are transparent during the low phase of `clk`; the Rewrite FSM drives their data from flops that change on the rising edge, so the data is stable throughout the transparent phase. A latch word is written only when nothing can be reading it: configuration while the pinset is invalid, buffers in the phases below. If the latch cells fail gate-level simulation, `cfg_latch` is rebuilt from flops with no other change.
 
-**Latch-based buffers.** The TX buffer (64 bits) and the GUI buffer (64 data bits, 24-bit header snapshot, length and flags) of each pinset use the same `cfg_latch` words. Their writers and readers never overlap:
+**Latch-based buffers.** The TX buffer (72 bits) and the GUI buffer (64 data bits, 24-bit header snapshot, length and flags) of each pinset use the same `cfg_latch` words. Their writers and readers never overlap:
 
-- TX buffer: written by the Controller in one cycle on TRANSMIT, which is refused while `tx_lock` is set. If a target program is running but not locked, the write first stops it and restarts it afterwards, so no sequencer reads the buffer during the write.
+- TX buffer: written by the Controller in one cycle on TRANSMIT, which is refused while `tx_lock` is set. If a program is running but not locked (an armed target response, or an idle run), the write first stops it and restarts it afterwards, so no sequencer reads the buffer during the write.
 - GUI buffer: written by output staging one byte at a time; read by the GUI Output Controller only after the record is marked ready, at which point staging writes nothing until `gui_rec_take` returns the buffer.
 
 The memory FIFO, the Controller's command buffer and the READ_MEM readback register stay as flops: each is written and read in the same cycles. Confirm the exact cell names in the `sg13cmos5l` library before writing `cfg_latch`; the sg13g2 equivalents are `sg13g2_dlhq_1` and `sg13g2_lgcp_1`.
@@ -964,7 +1000,7 @@ File: `protocol_mem.sv`. One instance: the SRAM macro, a port arbiter and the ad
 
 **Storage**
 
-`RM_IHPSG13_1P_512x16_c2_bm_bist` from the IHP PDK: 512 words × 16 bits, single port, synchronous, registered read (address in one cycle, data out the next), per-bit write mask (unused: whole words are written), BIST pins tied off. 236.8 × 191.34 µm. Power pins on Metal4 only. The 16-bit word is the instruction width and the template word width, so nothing is packed or split. Under `` `ifdef SIM`` a behavioural array stands in for the macro; gate-level simulation uses the macro's own Verilog model. On an FPGA the same port maps onto inferred block RAM.
+`RM_IHPSG13_1P_512x16_c2_bm_bist` from the IHP PDK: 512 words × 16 bits, single port, synchronous, registered read (address in one cycle, data out the next), per-bit write mask (unused: whole words are written), BIST pins tied off, `A_DLY` tied to 1 as the macro datasheet requires. 236.8 × 191.34 µm. Power pins on Metal4 only. The 16-bit word is the instruction width and the template word width, so nothing is packed or split. Under `` `ifdef SIM``, which `test/Makefile` defines for RTL simulation, a behavioural array named `mem` stands in for the macro; gate-level simulation uses the macro's own Verilog model.
 
 The memory is not reset and is undefined at power-up. The host loads it.
 
@@ -991,7 +1027,7 @@ Template t occupies words `0x1C0 + 8t` to `0x1C0 + 8t + 7`:
 
 **Port and arbiter**
 
-Ten requesters share the single port: eight sequencers (two per pinset), the Rewrite FSM, and the Controller (WRITE_MEM writes, READ_MEM reads). Each holds `pm_req` with `pm_addr` (and `pm_we`, `pm_wdata` for the Controller) until it sees its `pm_ack`. A round-robin arbiter grants one request per cycle. For a read, `pm_ack` returns with `pm_rdata` two cycles after the grant; for a write, one cycle after. Worst-case latency with all ten requesting is about 12 cycles; typical is 2–3, because sequencers fetch at most once per instruction and the other two requesters are idle almost always.
+Ten requesters share the single port: eight sequencers (two per pinset), the Rewrite FSM, and the Controller (WRITE_MEM writes, READ_MEM reads). Each holds `pm_req` with `pm_addr` (and `pm_we`, `pm_wdata` for the Controller) until it sees its `pm_ack`. The one exception is a sequencer that stops before its ack: it removes its request, and the arbiter drops that fetch and returns no `pm_ack` for it, whether or not it had been granted. A removed request stays low for at least one cycle before that sequencer requests again. A round-robin arbiter grants one request per cycle. For a read, `pm_ack` returns with `pm_rdata` two cycles after the grant; for a write, one cycle after. Worst-case latency with all ten requesting is about 12 cycles; typical is 2–3, because sequencers fetch at most once per instruction and the other two requesters are idle almost always.
 
 The port is the only path into the array. Nothing else can corrupt a program, and a slot in use is protected by the Controller's in-use check rather than by the memory.
 
@@ -1002,15 +1038,21 @@ The port is the only path into the array. Nothing else can corrupt a program, an
 | 0 | UART 115200 8N1 | 0 | TX P12, RX P8 | 347 | NRZ, DATA_BITS 7, LSB first, RX_SLOT 1 |
 | 1 | SPI controller, mode 0, 1 MHz | 1 | MOSI P13, MISO P8, SCLK P12, CS P14 | 40 | MASTER, DATA_BITS 7, MSB first |
 | 2 | SPI target, mode 0 | 1 | MISO P12, MOSI P9, SCLK P8, CS P10 | 40 | CLKED, DATA_BITS 7, MSB first, FILL 0 |
-| 3 | I2C controller, 100 kHz | 2 | SDA P1 on slots 0 and 1, SCL P0 | 400 | MASTER, DATA_BITS 7, MSB first, open-drain |
+| 3 | I2C controller, 100 kHz | 2 | SDA P1 on slots 0 and 1, SCL P0 | 400 | MASTER, DATA_BITS 7, MSB first, open-drain, SCL bidirectional so CLK_WAIT can read it |
 | 4 | I2C target | 2 | SDA P1 on slots 0 and 1, SCL P0 | 400 | CLKED, ADDR 0 until overridden, open-drain, FILL 1 |
-| 5 | USB_LS, 1.5 Mb/s | 3 | D+ P0, D− P1 | 27 | NRZI, BIT_STUFF, LSB first, differential, idle J |
-| 6 | Placeholder | 6 | — | — | PROTO 6, so SET_PROTO rejects it until the ETH10 overlay replaces it |
+| 5 | USB_LS host, 1.5 Mb/s | 3 | D+ P0, D− P1 | 27 | MASTER, NRZI, BIT_STUFF, LSB first, differential, idle J. The program's TRIM 3 makes the average 26.67 |
+| 6 | USB_LS device | 3 | D+ P0, D− P1 | 27 | As template 5 without MASTER. ADDR 0 until overridden. The ETH10 overlay replaces this template |
 | 7 | RAW | 7 (built in) | out P12, in P8 | 347 | NRZ, DATA_BITS 7, LSB first |
 
 Pins are unchanged from the hard-wired design; only the slot each pin sits in follows the fixed slot roles now.
 
-**ETH10 overlay.** `protocol_mem_eth10.hex` is 30 blocks: the ETH10 TX and RX programs for slot 3 (28 blocks, replacing USB_LS) and an ETH10 template for index 6 (2 blocks) with PROTO 3, pins TX+ P12, TX− P13, RX+ P8, RX− P9, BIT_DIV 6, Manchester, CRC32, LSB first, differential, RX_SLOT 2. The host loads it when it needs Ethernet framing and reloads the USB_LS blocks to go back. Nothing in hardware changes; the Manchester primitives stay in every pinset.
+**ETH10 overlay.** `protocol_mem_eth10.hex` is 30 blocks: the ETH10 TX and RX programs for slot 3 (28 blocks, replacing USB_LS) and an ETH10 template for index 6 (2 blocks) with PROTO 3, pins TX+ P12, TX− P13, RX+ P8, RX− P9, BIT_DIV 6, Manchester, CRC32, LSB first, differential, RX_SLOT 2. The host loads it when it needs Ethernet framing and reloads the same 30 blocks from the default image to go back. Nothing in hardware changes; the Manchester primitives stay in every pinset.
+
+**UART space-parity overlay.** `protocol_mem_uart_space.hex` is 28 blocks, the two programs of slot 0. It is the default UART pair with the parity step replaced: the TX program sends a 0 with `ACT TICK DRIVE_0` where the default has PARITY_OUT, and the RX program samples that bit and raises SET_ERR if it is 1. The UART template is used unchanged, with PARITY left at none. This is the one parity mode the 2-bit PARITY field has no code for.
+
+**I2C 10-bit target overlay.** `protocol_mem_i2c10.hex` is 28 blocks, the two programs of slot 2, holding a target-only pair. ADDR is set to `11110` followed by address bits 9:8, which is the first byte of a 10-bit address. The RX program matches that byte with MATCH_ADDR and SIGNALs for its ACK, then compares the second byte with a MATCH_IMM whose immediate is the low address byte, and SIGNALs again only on a match. The TX program ACKs once per SIGNAL and returns to its start on a STOP, so a second byte meant for another device is never ACKed. A repeated START followed by the first byte with the read bit selects the armed response. The low address byte is an immediate in the program: the generator emits the overlay for a given address and reports which block holds it, so the host can change the address by rewriting that one block.
+
+A 10-bit controller needs no overlay. The default controller program sends the two address bytes as the first two bytes of a write. A read is a HOLD write of those two bytes followed by a read message whose byte 0 is the first address byte with the read bit.
 
 **UART template, as an example**
 
@@ -1032,12 +1074,16 @@ Sizes are from hand assembly against the instruction set and will move a little 
 
 | Slot | Protocol | TX program | RX program |
 |---|---|---|---|
-| 0 | UART | 9: start bit, data, parity, stop bits per byte | 15: start edge, confirm mid-bit, data, parity, stop check, idle end |
-| 1 | SPI | ~10: controller: SEL_ON, CLK_RUN, STREAM_OUT, CLK_STOP, SEL_OFF. Target: wait SEL_ON, LOCK, STREAM_OUT | ~6: ENDS SEL_OFF; wait SEL_ON; FRAME_BEGIN; STREAM_IN; FRAME_END |
-| 2 | I2C | ~52: controller: START or repeated START by HELD, address, ACK by SAMPLE, write loop with NACK abort, read loop with COUNT and ACK/NACK, STOP or hold by HOLD. Target: wait PEER, ACK, LOCK, then ACK each byte or shift bytes out until NACK | ~22: controller: on PEER, bytes of the read phase with the ACK clock skipped. Target: START, address, MATCH_ADDR, SIGNAL, bytes until STOP |
-| 3 | USB_LS | ~16: LOAD_IMM 0x80, PID byte, CRC_SEL by B0 and B1, STREAM_OUT, CRC_OUT, EOP as SE0 for 2 bits then J | ~18: first edge, SYNC by MATCH_IMM 0x80, PID, CRC_SEL by class, STREAM_IN until SE0, CRC_CHECK |
-| 3 (overlay) | ETH10 | ~14: COUNT_IMM 7 preamble loop of LOAD_IMM 0x55, LOAD_IMM 0xD5, CRC_SEL 3, STREAM_OUT, CRC_OUT | ~10: first edge, shift until MATCH_IMM 0xD5, CRC_SEL 3, STREAM_IN until idle, CRC_CHECK |
+| 0 | UART | 10: start bit, data, parity, stop bits per byte, a half stop bit by TIMER_SYNC when STOP = 1.5 | 15: start edge, confirm mid-bit, data, parity, stop check, idle end |
+| 1 | SPI | ~13: controller: SEL_ON unless HELD, CLK_RUN, STREAM_OUT, CLK_STOP, then SEL_OFF, or END with hold when HOLD. Target: wait SEL_ON, LOCK, STREAM_OUT | ~6: ENDS SEL_OFF; wait SEL_ON; FRAME_BEGIN; STREAM_IN; FRAME_END |
+| 2 | I2C | ~52: controller: START or repeated START by HELD, address, ACK by SAMPLE, write loop with NACK abort, read loop with COUNT and ACK/NACK that releases SDA with SAMPLE for the data bits, STOP or hold by HOLD. Target: wait PEER, ACK, LOCK, then ACK each byte or shift bytes out until NACK | ~25: controller: OPT with CLK_WAIT and COLL, then on PEER, bytes of the read phase with the ACK clock skipped. Target: START, address, MATCH_ADDR, SIGNAL, bytes until STOP |
+| 3 | USB_LS | ~30: LOAD_IMM 0x80, PID byte, CRC_SEL by B0 and B1, STREAM_OUT, CRC_OUT, EOP as SE0 for 2 bits then J. Device: first wait PEER, LOCK and a TICK count for the turnaround. Host idle run: about 1 ms of TICK waits in a COUNT loop, wait for 8 idle bit times, LOCK, an EOP as the keep-alive | ~48: TRIM 3, and OPT with IDLE_RUN in a host; first edge, SYNC by MATCH_IMM 0x80, PID, CPL_CHECK, CRC_SEL by class, STREAM_IN until SE0, CRC_CHECK. Device: a token's address by MATCH_ADDR after its first 7 bits; SIGNAL at the end of an error-free IN token to ADDR, or of an error-free data packet that follows an OUT or SETUP token to ADDR, with COUNT holding "addressed" between the two |
+| 3 (overlay) | ETH10 | ~26: COUNT_IMM 7 preamble loop of LOAD_IMM 0x55, LOAD_IMM 0xD5, CRC_SEL 3, STREAM_OUT, CRC_OUT. Idle run: 255 passes of 216 bit times of TICK waits (16.5 ms at BIT_DIV 6), LOCK, DRIVE_1 for one bit time as the link pulse | ~12: OPT with IDLE_RUN; first edge, shift until MATCH_IMM 0xD5, CRC_SEL 3, STREAM_IN until idle, CRC_CHECK |
+| 0 (overlay) | UART space parity | 10: the UART program with DRIVE_0 as the parity bit | 17: the UART program with SAMPLE, a branch and SET_ERR as the parity check |
+| 2 (overlay) | I2C 10-bit target | ~20: wait PEER with ENDS STOP, ACK, and again for the second byte; LOCK; then ACK each byte or shift bytes out until NACK | ~30: START, first byte, MATCH_ADDR, SIGNAL, second byte, MATCH_IMM, SIGNAL, bytes until STOP; a repeated START and the first byte with the read bit SIGNAL for the response |
 | 7 | RAW (built in) | 2: STREAM_OUT, END | 4: DIN_EDGE, TIMER_SYNC, FRAME_BEGIN, STREAM_IN until idle, FRAME_END |
+
+The USB_LS RX program is the largest and the closest to its limits. At 27 cycles per bit only about six instructions fit between two bits, so it makes its decisions at the end of a packet, where the bus turnaround leaves time, and it checks the packet identifier with the single-cycle CPL_CHECK instead of a chain of compares. If the real program does not fit in 56 instructions, the device half moves to an overlay.
 
 Everything in the old per-protocol framing tables is now one of these programs. Adding a protocol is writing two more and a template, then 30 WRITE_MEM frames.
 
@@ -1047,7 +1093,7 @@ Everything in the old per-protocol framing tables is now one of these programs. 
 - A program slot cannot be written while a valid pinset has PROTO equal to it. Templates can be written at any time the Rewrite FSM is idle.
 - RAW (PROTO 7) never reads the memory, so it works before the image is loaded and after a bad upload.
 
-**Generation.** `test/gen_protocol_mem.py` holds the template tables and an assembler for the mnemonics in the Sequencer section. It emits `protocol_mem_default.hex` (512 words) and `protocol_mem_eth10.hex` (the overlay), which the host firmware embeds and the cocotb testbench loads through WRITE_MEM frames or directly into the simulation model. The same Python module is the reference model's view of the image, so RTL and reference cannot disagree.
+**Generation.** `test/gen_protocol_mem.py` holds the template tables and an assembler for the mnemonics in the Sequencer section. It emits `protocol_mem_default.hex` (512 words) and the overlays (`protocol_mem_eth10.hex`, `protocol_mem_uart_space.hex`, `protocol_mem_i2c10.hex`), which the host firmware embeds and the cocotb testbench loads through WRITE_MEM frames or directly into the simulation model (the `mem` array in `protocol_mem`). The same Python module is the reference model's view of the image, so RTL and reference cannot disagree.
 
 ### GUI Output Controller
 
@@ -1141,7 +1187,7 @@ tt_um_coms_emu_js_JCDM         project.v       Tiny Tapeout wrapper, ties ena, r
 pe_pkg                         pe_pkg.sv       Op codes, instruction encodings, enums, field widths, CRC residues
 ```
 
-`info.yaml` lists `pe_pkg.sv` first, then the rest. `project.v` stays a thin wrapper so the design can be simulated or run on an FPGA without the Tiny Tapeout interface. On an FPGA the SRAM macro is replaced by inferred block RAM behind the same `protocol_mem` port.
+`info.yaml` lists `pe_pkg.sv` first, then the rest. `project.v` stays a thin wrapper so the design can be simulated without the Tiny Tapeout interface.
 
 ### Area budget
 
@@ -1157,13 +1203,14 @@ Cell-equivalents, 1 flop ≈ 3.5. Estimates are ±30%.
 | Controller | 1.2K | +0.2K: WRITE_MEM, READ_MEM, in-use check |
 | GUI and memory output | 2.0K | — |
 | Latch-based configuration and buffers (saving) | −1.1K | −0.6K: TX and GUI buffers as latches |
-| Subtotal | 19.4K | +0.4K |
-| With 12% clock tree and hold buffers | ~21.7K | |
+| Protocol extensions: ninth TX buffer byte and eleventh command byte, TRIM, option flags, CLK_WAIT, drive sync, collision detect, complement check, idle run | 0.45K | new |
+| Subtotal | 19.85K | +0.85K |
+| With 12% clock tree and hold buffers | ~22.2K | |
 | SRAM macro, 1.45 tiles plus routing halo, as tile-equivalent | ~1.85K | new |
-| Total | ~23.6K | |
+| Total | ~24.1K | |
 | Budget | 24K | |
 
-The estimate is about 2% under budget, well inside its ±30% error. Mitigations in order if synthesis runs high: `FULL_PROTOCOLS` = 0 on all pinsets (about −1.2K; the ETH10 slot then has no primitives to run on), 2-bit FILTER and 12-bit BIT_DIV (about −0.4K), 4-byte GUI buffers (about −0.6K), three pinsets (about −3.6K). Decide after the first synthesis run, not before.
+The estimate is level with the budget, about 0.3% over, which is far inside its ±30% error: it does not show whether the design fits. The protocol extensions row is the newest and the least certain; about 0.17K of it is TRIM and 0.15K the wider buffers. Mitigations in order if synthesis runs high: `FULL_PROTOCOLS` = 0 on all pinsets (about −1.2K; the ETH10 slot then has no primitives to run on), 2-bit FILTER and 12-bit BIT_DIV (about −0.4K), 4-byte GUI buffers (about −0.6K), three pinsets (about −3.6K). Decide after the first synthesis run, not before.
 
 What the SRAM buys: 8 Kbit of writable storage. The same bits as latches would cost about 20K cell-equivalents, so without the macro the design could hold at most one writable slot alongside hard-wired defaults. A hard-wired copy of the default image as a boot ROM would cost about 1.5–2K and is not planned; the host loads the image.
 
@@ -1171,7 +1218,7 @@ What the SRAM buys: 8 Kbit of writable storage. The same bits as latches would c
 
 - Every stage of each FSM is one register deep. The longest paths are the slot muxes (16:1 from the crossbar) and the per-pin output select (4:1 by OWNER). Both are registered.
 - `CLOCK_PERIOD` 25 ns, `PL_TARGET_DENSITY_PCT` 50 in `src/config.json`. The macro is placed with `MACROS` / `PDN` settings in the same file; its power pins are on Metal4 only, which the LibreLane PDN must bridge.
-- The SRAM runs on `clk`. Its read is registered: address in one cycle, data the next. The macro's Liberty timing must be checked against the 25 ns period once the flow runs; the `A_DLY` pin selects a slower, safer timing mode if needed.
+- The SRAM runs on `clk`. Its read is registered: address in one cycle, data the next. The macro's Liberty timing must be checked against the 25 ns period once the flow runs.
 - Instruction fetch is not on any bit-rate critical path by construction: STREAM ops run without fetches, and a taken branch costs at most about 12 cycles. The slowest acceptable bit for a program with a branch at every byte boundary is about 12 cycles, i.e. 3.3 Mbit/s.
 - Manchester framing at 10 Mbit/s (BIT_DIV 2) is out of reach for a program; the primitives can decode it but the sequencer cannot keep up at frame transitions. ETH10 is kept as an overlay for framing work at BIT_DIV ≥ 6.
 
@@ -1194,19 +1241,22 @@ Before the image exists, `1C 7x`-style RAW setups (template 7, built in) work wi
 
 - One protocol per pinset. Four UARTs on one pinset are not possible.
 - Four role slots. SPI with more than one chip select does not fit.
-- Messages are limited to 8 bytes per TRANSMIT and per GUI record. Ethernet's 64-byte minimum frame cannot be sent. I2C reads are the exception: up to 255 bytes.
+- Messages are limited to 9 bytes per TRANSMIT and 8 bytes per GUI record. Ethernet's 64-byte minimum frame cannot be sent. Two cases go further: I2C reads, up to 255 bytes, and an SPI controller transaction, which HOLD continues across messages with the clock paused between them.
 - Memory dump serves one pinset at a time. Each memory slot carries at most 7 message bytes.
 - The GUI output carries about 100 KB/s, below sustained 10BASE-T rates.
 - The host port carries about 500 KB/s of TRANSMIT payload.
-- ETH10 at 10 Mbit/s is not reachable by a program; the ETH10 overlay is specified for BIT_DIV ≥ 6. There is no link pulse support.
-- USB_LS BIT_DIV 27 has a 1.2% rate error, inside tolerance but with reduced margin. There is no fractional BIT_DIV. The default USB_LS RX program does not check the PID complement.
-- I2C clock stretching, multi-controller arbitration and 10-bit addressing are not supported by the default programs, and there is no register field for a 10-bit address.
+- ETH10 at 10 Mbit/s is not reachable by a program; the ETH10 overlay is specified for BIT_DIV ≥ 6. Its link pulse is one bit time wide (300 ns at BIT_DIV 6) where 10BASE-T uses 100 ns, so a real link partner may not accept it.
+- USB_LS runs at the exact average rate (BIT_DIV 27 with TRIM 3) with one cycle of jitter. TRIM offers only one cycle in N, so most other fractional rates are approximated.
+- A USB_LS device sends whatever reply is armed; the host firmware must arm the right one before the transfer, and with nothing armed the device does not answer. The USB_LS host program sends keep-alives, held off only while the line is busy. There is no bus reset, no connect detection and no frame scheduling.
+- An I2C controller honours clock stretching and detects lost arbitration (CLK_WAIT and COLL), but does not retry: the host sends the message again, and READ_STATUS reports a collision in one bit for all pinsets. An I2C target does not stretch the clock.
+- A 10-bit I2C target address needs the I2C 10-bit overlay, which replaces the default I2C programs and holds the low address byte in the program. UART space parity needs the space-parity overlay, which replaces the default UART programs.
+- A half stop bit moves the pinset's bit timer, which the receive side shares, so a byte being received at that moment is sampled half a bit off. Use 1.5 stop bits in one direction at a time.
 - The protocol memory is volatile. The host must load the image after every power-up before any SET_PROTO other than RAW. There is no boot ROM.
 - A protocol slot cannot be rewritten while a valid pinset runs it. Release or reconfigure the pinset first.
 - A program is at most 56 instructions per direction, and can only use the primitives that exist: NRZ, NRZI and Manchester line codes, three CRC polynomials, bit stuffing after six 1s, four slots, one byte counter. A protocol outside that set (CAN arbitration, 1-Wire pulse widths, a second chip select) needs new primitives, not just a new program.
-- Four protocol slots, and the memory is fully allocated. PROTO 4–6 are rejected. ETH10 is not resident by default; loading its overlay displaces USB_LS from slot 3 until the host writes USB_LS back.
+- Four protocol slots, and the memory is fully allocated. PROTO 4–6 are rejected. The overlays are not resident: ETH10 displaces USB_LS from slot 3 and template 6, UART space parity displaces UART from slot 0, and I2C 10-bit target displaces I2C from slot 2, each until the host writes the default blocks back.
 - A target-mode response waits indefinitely for the external controller. There is no timeout; the host replaces or releases it.
-- An I2C controller holding the bus after a HOLD message keeps SCL low until the next TRANSMIT, RELEASE or SET_PROTO.
+- A controller holding the bus after a HOLD message keeps it held (I2C: SCL low; SPI: CS low) until the next TRANSMIT, RELEASE or SET_PROTO.
 - No programmable pulls; fit external resistors. P12–P15 cannot tri-state.
 - The status byte reports only the most recent command.
-- The 64-bit pinset register is fully allocated.
+- The 64-bit pinset register is fully allocated. Settings added since (TRIM and the option flags) are set by the RX program, so they cannot differ between two pinsets running the same slot.

@@ -25,7 +25,7 @@ can be added later if the primitives can express it.
 
 A host configures the chip over SPI. SET_PROTO copies a template from the
 protocol memory into a pinset's configuration registers, with optional baud
-rate or address and pin-offset overrides. TRANSMIT sends up to 8 bytes on a
+rate or address and pin-offset overrides. TRANSMIT sends up to 9 bytes on a
 pinset. Commands execute when CS_n rises; malformed frames are ignored.
 
 Received traffic is decoded and output two ways:

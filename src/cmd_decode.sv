@@ -11,7 +11,9 @@
 //   Rewrite FSM, DUMP_CTRL to the enable flops, TRANSMIT to a pinset in one
 //   cycle, MEM_RESET to dump_mem, WRITE_MEM as four port writes after the
 //   in-use check, READ_MEM as a block fetch during the frame. Keeps the
-//   status byte and the READ_STATUS snapshot taken on cs_fall.
+//   status byte and the READ_STATUS snapshot taken on cs_fall, including the
+//   sticky RX overflow bits and the TX collision bit (set by a tx_coll
+//   pulse from any pinset, cleared on read).
 //
 //   The payload is never interpreted; protocol rules live in the programs.
 
@@ -28,7 +30,7 @@ module cmd_decode (
     input  wire [3:0]  byte_cnt,
     input  wire        bit_misaligned,
     input  wire        overflow,
-    input  wire [79:0] cmd_buf,
+    input  wire [87:0] cmd_buf,
 
     // To host_spi
     output wire [7:0]  status,
@@ -51,7 +53,7 @@ module cmd_decode (
     // TRANSMIT to the pinsets
     output wire [3:0]  tx_load,
     output wire [3:0]  tx_len,
-    output wire [63:0] tx_data,
+    output wire [71:0] tx_data,
     output wire        tx_hold,
     output wire        tx_persist,
 
@@ -73,6 +75,7 @@ module cmd_decode (
     input  wire [3:0]  tx_busy,
     input  wire [3:0]  tx_lock,
     input  wire [3:0]  rx_ovf,
+    input  wire [3:0]  tx_coll,
     input  wire [11:0] proto,
     input  wire [3:0]  master,
     input  wire        dump_pending,
